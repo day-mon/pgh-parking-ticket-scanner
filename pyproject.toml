@@ -1,0 +1,25 @@
+[project]
+name = "pgh-ticket"
+version = "0.1.0"
+description = "Pittsburgh parking ticket scanner"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3",
+    "aiohttp-socks>=0",
+    "aiohttp-retry>=2",
+    "cyclopts>=4",
+    "sqlalchemy>=2.0.49",
+    "platformdirs>=4.9.6",
+]
+
+[project.scripts]
+pgh-ticket = "pgh_ticket.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pyrefly>=1.0.0",
+]
