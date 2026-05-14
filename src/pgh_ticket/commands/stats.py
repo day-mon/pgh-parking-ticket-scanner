@@ -1,57 +1,146 @@
+"""/stats -- aggregate summaries of all tickets in the database."""
+
 from __future__ import annotations
 
-import sys
 from typing import Annotated
 
 from cyclopts import Parameter
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from pgh_ticket.db import Database
+from pgh_ticket.commands.base import BaseCommand
+from pgh_ticket.models import Scan, Ticket
+
+console = Console()
 
 
-async def run(
-    db_path: Annotated[
-        str | None,
-        Parameter(("--db",), help="path to sqlite database", show=False),
-    ] = None,
-) -> None:
-    db = Database(db_path)
-    db.init()
-    s = db.get_summary()
+class StatsCommand(BaseCommand):
+    """Show aggregate ticket statistics (by status, by state, recent scans)."""
 
-    if s.get("total", 0) == 0:
-        print("no tickets in database.", file=sys.stderr)
-        return
+    async def __call__(
+        self,
+        *,
+        session: Annotated[AsyncSession, Parameter(parse=False)] = None,  # type: ignore[assignment]
+    ) -> None:
+        # Total count
+        total = (await session.execute(select(func.count(Ticket.ticket_number)))).scalar_one() or 0
 
-    dr = s["date_range"]
-    print(f"total tickets: {s['total']}")
-    print(f"date range:    {dr['first']} to {dr['last']}")
-    print()
+        if total == 0:
+            console.print("[yellow]no tickets in database.[/]")
+            return
 
-    print("by status:")
-    for label, n in s["by_status"].items():
-        print(f"  {label:<25s}  {n:>5d}  ({100 * n / s['total']:5.1f}%)")
-
-    print()
-    print("by state (top 10):")
-    for label, n in list(s["by_state"].items())[:10]:
-        print(f"  {label:<4s}  {n:>5d}  ({100 * n / s['total']:5.1f}%)")
-
-    if s.get("open_by_state"):
-        open_total = sum(s["open_by_state"].values())
-        print()
-        print(f"open by state (top 10, {open_total} total):")
-        for label, n in list(s["open_by_state"].items())[:10]:
-            print(f"  {label:<4s}  {n:>5d}  ({100 * n / open_total:5.1f}%)")
-
-    scans = db.recent_scans()
-    if scans:
-        print()
-        print("recent scans:")
-        for sc in scans:
-            print(
-                f"  {sc['scanned_at'][:19]}  "
-                f"{sc['range_start']:,}-{sc['range_end']:,}  "
-                f"until {sc['until_date']}  "
-                f"{sc['tickets_found']} tickets  "
-                f"{sc.get('duration_s', 0):.1f}s"
+        # Date range
+        first_date, last_date = (
+            await session.execute(
+                select(func.min(Ticket.issue_date), func.max(Ticket.issue_date))
             )
+        ).one()
+
+        # By status
+        by_status = {
+            r[0] or "": r[1]
+            for r in (
+                await session.execute(
+                    select(Ticket.status, func.count(Ticket.ticket_number))
+                    .group_by(Ticket.status)
+                    .order_by(func.count(Ticket.ticket_number).desc())
+                )
+            ).all()
+        }
+
+        # By state
+        by_state = {
+            r[0] or "": r[1]
+            for r in (
+                await session.execute(
+                    select(Ticket.state, func.count(Ticket.ticket_number))
+                    .group_by(Ticket.state)
+                    .order_by(func.count(Ticket.ticket_number).desc())
+                )
+            ).all()
+        }
+
+        # Open by state
+        open_by_state = {
+            r[0] or "": r[1]
+            for r in (
+                await session.execute(
+                    select(Ticket.state, func.count(Ticket.ticket_number))
+                    .where(func.lower(Ticket.status) == "open")
+                    .group_by(Ticket.state)
+                    .order_by(func.count(Ticket.ticket_number).desc())
+                )
+            ).all()
+        }
+
+        # Overview
+        overview = Table.grid(padding=(0, 4))
+        overview.add_row(
+            Text("total tickets:", style="bold"),
+            str(total),
+            Text("date range:", style="bold"),
+            f"{first_date or ''} to {last_date or ''}",
+        )
+        console.print(overview)
+        console.print()
+
+        # By status table
+        status_table = Table(title="by status", title_style="bold")
+        status_table.add_column("status", style="cyan")
+        status_table.add_column("count", justify="right")
+        status_table.add_column("%", justify="right")
+        for label, n in by_status.items():
+            status_table.add_row(label, str(n), f"{100 * n / total:5.1f}%")
+        console.print(status_table)
+        console.print()
+
+        # By state table
+        state_table = Table(title="by state", title_style="bold")
+        state_table.add_column("state", style="cyan")
+        state_table.add_column("count", justify="right")
+        state_table.add_column("%", justify="right")
+        for label, n in list(by_state.items())[:10]:
+            state_table.add_row(label, str(n), f"{100 * n / total:5.1f}%")
+        console.print(state_table)
+
+        # Open by state
+        if open_by_state:
+            open_total = sum(open_by_state.values())
+            console.print()
+            open_table = Table(title=f"open by state ({open_total} total)", title_style="bold")
+            open_table.add_column("state", style="cyan")
+            open_table.add_column("count", justify="right")
+            open_table.add_column("%", justify="right")
+            for label, n in list(open_by_state.items())[:10]:
+                open_table.add_row(label, str(n), f"{100 * n / open_total:5.1f}%")
+            console.print(open_table)
+
+        # Recent scans
+        scans = (
+            await session.execute(
+                select(Scan).order_by(Scan.scanned_at.desc()).limit(10)
+            )
+        ).scalars().all()
+        if scans:
+            console.print()
+            scan_table = Table(title="recent scans", title_style="bold")
+            scan_table.add_column("when", style="dim")
+            scan_table.add_column("range")
+            scan_table.add_column("until")
+            scan_table.add_column("tickets", justify="right")
+            scan_table.add_column("duration", justify="right")
+            for sc in scans:
+                scan_table.add_row(
+                    sc.scanned_at[:19],
+                    f"{sc.range_start:,}-{sc.range_end:,}",
+                    sc.until_date,
+                    str(sc.tickets_found),
+                    f"{sc.duration_s:.1f}s",
+                )
+            console.print(scan_table)
+
+
+stats_cmd = StatsCommand()
