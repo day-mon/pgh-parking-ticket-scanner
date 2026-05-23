@@ -29,7 +29,11 @@ async def _geocode_one(location: str) -> dict | None:
             return None
 
         geocoder = Geocoder(access_token=token)
-        response = geocoder.forward(location + ", Pittsburgh, PA")
+        response = geocoder.forward(
+            location + ", Pittsburgh, PA",
+            country=["us"],
+            bbox=[-84.51012, 38.50932, -75.12281, 42.73322],
+        )
 
         if response.status_code != 200:
             return None

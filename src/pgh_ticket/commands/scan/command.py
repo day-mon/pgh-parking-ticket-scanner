@@ -13,7 +13,7 @@ from cyclopts import validators as cyclopts_validators
 from pgh_ticket.core import Database, TicketView, parse_range
 from pgh_ticket.core.fmt import console, build_ticket_table, print_summary
 from pgh_ticket.core.utils import resolve_proxy
-from pgh_ticket.core.client import PortalClient
+from pgh_ticket.core.client import ClientPool, PortalClient
 from pgh_ticket.repos import ScanRepo
 
 from .scanner import Scanner
@@ -75,9 +75,22 @@ async def scan(
 
     t0 = time.monotonic()
 
-    async with PortalClient(proxy=resolve_proxy(proxy)) as client:
-        scanner = Scanner(client, db)
-        found, n_errs = await scanner.run(lo, hi, target, step, workers, skip_known)
+    proxies = resolve_proxy(proxy)
+    proxy_list: list[str] = []
+    if isinstance(proxies, list):
+        proxy_list = proxies
+    elif isinstance(proxies, str):
+        proxy_list = [proxies]
+
+    if len(proxy_list) > 1:
+        console.print(f"using [yellow]{len(proxy_list)}[/] proxies with [yellow]{workers}[/] workers")
+        async with ClientPool(proxy_list, workers) as pool:
+            scanner = Scanner(pool, db)
+            found, n_errs = await scanner.run(lo, hi, target, step, workers, skip_known)
+    else:
+        async with PortalClient(proxy=proxies) as client:
+            scanner = Scanner(client, db)
+            found, n_errs = await scanner.run(lo, hi, target, step, workers, skip_known)
 
     duration = time.monotonic() - t0
 

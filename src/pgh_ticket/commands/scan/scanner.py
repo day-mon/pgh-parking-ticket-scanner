@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from pgh_ticket.core import Database, TicketView, make_progress, parse_date
-from pgh_ticket.core.client import PortalClient, SearchResult
+from pgh_ticket.core import Database, TicketView, make_progress, parse_date, resource_map
+from pgh_ticket.core.client import ClientPool, PortalClient, SearchResult
 from pgh_ticket.core.fmt import console
 from pgh_ticket.core.workers import WorkerPool
 from pgh_ticket.repos import ClusterRepo, ErrorLogRepo, TicketRepo
@@ -14,9 +14,13 @@ from pgh_ticket.repos import ClusterRepo, ErrorLogRepo, TicketRepo
 class Scanner:
     """Two-phase scan: probe for clusters, then deep-scan windows."""
 
-    def __init__(self, client: PortalClient, db: Database) -> None:
-        self.client: PortalClient = client
+    def __init__(self, client: PortalClient | ClientPool, db: Database) -> None:
+        self.client_resource: PortalClient | ClientPool = client
         self.db: Database = db
+
+    @property
+    def _is_pooled(self) -> bool:
+        return isinstance(self.client_resource, ClientPool)
 
     @staticmethod
     def merge_hit_windows(hits: list[int], lo: int, hi: int, step: int) -> list[tuple[int, int]]:
@@ -36,6 +40,16 @@ class Scanner:
         workers: int,
         known: set[int],
     ) -> list[int]:
+        if self._is_pooled:
+            return await self._probe_pooled(coarse, workers, known)
+        return await self._probe_single(coarse, workers, known)
+
+    async def _probe_single(
+        self,
+        coarse: list[int],
+        workers: int,
+        known: set[int],
+    ) -> list[int]:
         progress = make_progress()
         task = progress.add_task("phase 1: probing", total=len(coarse), status="starting...")
 
@@ -45,13 +59,51 @@ class Scanner:
             ) as pool:
                 hits = await pool.map(
                     coarse,
-                    lambda n: _probe_one(self.client, known, n),
+                    lambda n: _probe_one(self.client_resource, known, n),  # type: ignore[arg-type]
                     on_error=lambda exc, n: _probe_on_error(self.db, exc, n),
                 )
 
         return [h for h in hits if h is not None]
 
+    async def _probe_pooled(
+        self,
+        coarse: list[int],
+        workers: int,
+        known: set[int],
+    ) -> list[int]:
+        progress = make_progress()
+        task = progress.add_task("phase 1: probing", total=len(coarse), status="starting...")
+        pool: ClientPool = self.client_resource  # type: ignore[assignment]
+        clients = [pool.acquire() for _ in range(workers)]
+
+        with progress:
+            results, failed = await resource_map(
+                coarse,
+                clients,
+                lambda c, n: _probe_one(c, known, n),
+                progress=progress,
+                task_id=task,
+            )
+
+        for n in failed:
+            async with self.db.session() as session:
+                await ErrorLogRepo(session).log(
+                    number=str(n), command="scan", exc=Exception("probe failed")
+                )
+
+        return [r for r in results if r is not None]
+
     async def deep_scan(
+        self,
+        deep_nums: list[int],
+        target: date,
+        workers: int,
+    ) -> tuple[list[TicketView], int]:
+        if self._is_pooled:
+            return await self._deep_scan_pooled(deep_nums, target, workers)
+        return await self._deep_scan_single(deep_nums, target, workers)
+
+    async def _deep_scan_single(
         self,
         deep_nums: list[int],
         target: date,
@@ -69,7 +121,7 @@ class Scanner:
             ) as pool:
                 batch_results = await pool.map(
                     deep_nums,
-                    lambda n: _deep_one(self.client, self.db, seen, target, n),
+                    lambda n: _deep_one(self.client_resource, self.db, seen, target, n),  # type: ignore[arg-type]
                     on_error=lambda exc, n: _deep_on_error(self.db, exc, n),
                 )
                 for batch in batch_results:
@@ -77,6 +129,41 @@ class Scanner:
                         found.extend(batch)
 
         return found, pool.errors
+
+    async def _deep_scan_pooled(
+        self,
+        deep_nums: list[int],
+        target: date,
+        workers: int,
+    ) -> tuple[list[TicketView], int]:
+        found: list[TicketView] = []
+        seen: set[str] = set()
+
+        progress = make_progress()
+        task = progress.add_task("phase 2: deep scan", total=len(deep_nums), status="starting...")
+        pool: ClientPool = self.client_resource  # type: ignore[assignment]
+        clients = [pool.acquire() for _ in range(workers)]
+
+        with progress:
+            results, failed = await resource_map(
+                deep_nums,
+                clients,
+                lambda c, n: _deep_one(c, self.db, seen, target, n),
+                progress=progress,
+                task_id=task,
+            )
+
+            for batch in results:
+                if batch:
+                    found.extend(batch)
+
+        for n in failed:
+            async with self.db.session() as session:
+                await ErrorLogRepo(session).log(
+                    number=str(n), command="scan-deep", exc=Exception("deep scan failed")
+                )
+
+        return found, len(failed)
 
     async def run(
         self,

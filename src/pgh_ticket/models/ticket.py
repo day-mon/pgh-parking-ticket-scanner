@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Index
+from sqlalchemy import Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pgh_ticket.models.base import Base
@@ -19,6 +19,12 @@ class Ticket(Base):
         Index("idx_tickets_state_status", "state", "status"),
         Index("idx_tickets_issue_date", "issue_date"),
         Index("idx_tickets_updated_at", "updated_at"),
+        Index("idx_tickets_location", "location"),
+        Index("idx_tickets_violation", "violation"),
+        Index("idx_tickets_officer", "officer"),
+        Index("idx_tickets_license_plate", "license_plate"),
+        Index("idx_tickets_ticket_key", "ticket_key"),
+        Index("idx_tickets_year", text("SUBSTR(issue_date, -4)")),
     )
 
     ticket_number: Mapped[str] = mapped_column(primary_key=True)
