@@ -1,6 +1,6 @@
 # pgh-ticket
 
-scanner for the **Pittsburgh Parking Authority** ticket portal. probes ticket numbers, scrapes details, stores results in sqlite.
+scanner for the **Pittsburgh Parking Authority** ticket portal. probes ticket numbers, scrapes details, stores results in postgresql.
 
 ## the problem
 
@@ -18,13 +18,13 @@ pgh-ticket lookup 8950000-8950005 --verbose
 one-off lookups. hits the api, stores in db. useful for testing connectivity.
 
 ```
-pgh-ticket scan 8950000-9245300 --until 2026-05-13 -j 20 --step 100
+pgh-ticket scan 8950000-9245300 --until 2026-05-13 -w 20 --step 100
 ```
 
 **two-phase scan.** phase 1 probes every `--step` numbers (~3k requests for a 295k range). phase 2 deep-scans merged windows around every hit, fetching details for each ticket. this is the main collection command.
 
 ```
-pgh-ticket sync 2026-05-08 --step 200 -j 3
+pgh-ticket sync 2026-05-08 --step 200 -w 3
 ```
 
 probe-only, date-filtered. finds tickets for one specific date. no deep scan — just search results filtered by issue date. circuit breaker built in (sleeps on repeated errors).
@@ -32,24 +32,28 @@ probe-only, date-filtered. finds tickets for one specific date. no deep scan —
 ```
 pgh-ticket list --state PA --status Open -n 20
 pgh-ticket list --date-from 2026-05-01 --date-to 2026-05-08 --verbose
+pgh-ticket list --state PA --limit 5 --json
 pgh-ticket stats
+pgh-ticket stats --json
 ```
 
-read-only queries. `list` filters by state, status, date range. `stats` shows aggregate breakdowns and recent scan history.
+read-only queries. `list` filters by state, status, date range. `stats` shows aggregate breakdowns and recent scan history. add `--json` for machine-readable output.
 
 ```
-pgh-ticket backfill details -n 100
-pgh-ticket backfill keys -n 100
-pgh-ticket backfill geocode
+pgh-ticket backfill details -w 40 --proxy socks5://10.64.0.1:1080
+pgh-ticket backfill details -w 40 --dry-run
+pgh-ticket backfill keys -w 10 --limit 1000
+pgh-ticket backfill geocode -w 5
+pgh-ticket backfill geocode -w 5 --dry-run
 ```
 
-enrich stored tickets. `details` fetches officer/location/violation for tickets missing them. `keys` fetches the api's internal ticket key. `geocode` turns location strings into lat/lon via mapbox.
+enrich stored tickets. `details` fetches officer/location/violation for tickets missing them. `keys` fetches the api's internal ticket key. `geocode` turns location strings into lat/lon via mapbox. `--dry-run` shows what would be done without writing to db.
 
 ```
 pgh-ticket errors list
 pgh-ticket errors stats
 pgh-ticket errors clear
-pgh-ticket errors retry
+pgh-ticket errors retry -w 5
 ```
 
 manage failed lookups. `retry` re-attempts unresolved errors.
@@ -63,14 +67,17 @@ manage failed lookups. `retry` re-attempts unresolved errors.
 
 ## database
 
-sqlite via sqlalchemy 2.0 async. stored at:
+postgresql via sqlalchemy 2.0 async. connection defaults:
 
-| os | path |
+| var | default |
 |---|---|
-| macos | `~/Library/Application Support/pgh-ticket/tickets.db` |
-| linux | `~/.local/share/pgh-ticket/tickets.db` |
+| host | `localhost` |
+| port | `5432` |
+| user | `pgh_ticket` |
+| password | `pgh_ticket` |
+| database | `pgh_ticket` |
 
-override with `--db /path/to/tickets.db`.
+override with `PGH_DATABASE_URL` env var (e.g. `postgresql+asyncpg://user:pass@host:5432/db`).
 
 ### tables
 
@@ -79,6 +86,16 @@ override with `--db /path/to/tickets.db`.
 - **error_logs** — number, command, error_type, retries, resolved state
 - **locations** — raw_location, address, latitude, longitude, geocoded_at
 - **clusters** — pre-computed probe intervals for the sync command
+
+### schema migrations
+
+managed with alembic. after pulling changes:
+
+```sh
+uv run alembic upgrade head
+```
+
+new migrations are auto-generated with `uv run alembic revision --autogenerate -m "description"`.
 
 ## setup
 
@@ -89,29 +106,39 @@ uv run pgh-ticket --help
 
 requires python 3.13+ and `uv`.
 
+### docker compose (postgres)
+
+a `compose.yaml` is included for local development:
+
+```sh
+docker compose up -d
+uv run alembic upgrade head
+```
+
 ## proxy
 
 mullvad socks5 proxy avoids ip-based rate limiting.
 
 ```sh
 uv run pgh-ticket scan ... --proxy socks5://10.64.0.1:1080
+uv run pgh-ticket backfill details -w 40 --proxy socks5://10.64.0.1:1080,socks5://10.64.0.2:1080
 ```
 
-without proxy, keep concurrency low (`-j 3`). direct ip with 50 workers → permanent 403 ban.
+proxies are comma-separated. pass multiple URLs in a single `--proxy` value. without proxy, keep concurrency low (`-w 3`). direct ip with 50 workers → permanent 403 ban.
 
 generate a proxy list:
 
 ```sh
-uv run scripts/parse_mullvad_proxies.py --limit 50 > proxies.txt
+uv run scripts/parse_mullvad_proxies.py --limit 50
 ```
 
 ## configuration
 
-env vars with `PGH_` prefix:
+env vars:
 
 | var | default | description |
 |---|---|---|
-| `PGH_DB_PATH` | (platformdirs) | sqlite path |
+| `PGH_DATABASE_URL` | `postgresql+asyncpg://pgh_ticket:pgh_ticket@localhost:5432/pgh_ticket` | postgres connection string |
 | `PGH_PROXY_URL` | — | default socks5 proxy |
 | `PGH_MAPBOX_TOKEN` | — | mapbox access token for geocoding |
 
