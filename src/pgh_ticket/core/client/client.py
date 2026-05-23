@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import secrets
 import string
@@ -12,12 +13,11 @@ from types import MappingProxyType
 from typing import Any
 
 import aiohttp
-import aiohttp_retry
 from aiohttp import TraceRequestEndParams, TraceRequestStartParams
-from aiohttp_retry import RetryClient
 from aiohttp_socks import ProxyConnector
 
 from pgh_ticket.config import portal
+from pgh_ticket.core.client.exceptions import PortalError, ProxyExhaustedError, ProxyRotateError
 from pgh_ticket.core.client.types import SearchResult, TicketDetail
 
 _CHROME_VERSIONS: tuple[int, ...] = tuple(range(120, 125))
@@ -73,8 +73,6 @@ HEADERS: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 
-RETRY_STATUSES: set[int] = {403, 429, 500, 502, 503, 504}
-
 
 class ProxyRotator:
     """Holds a list of SOCKS5 proxies and returns one on each call."""
@@ -102,7 +100,11 @@ class PortalClient:
         self,
         proxy: str | list[str] | None = None,
         *,
-        on_error: Callable[[str, Exception], None] | None = None,
+        connector: aiohttp.BaseConnector | None = None,
+        limit_per_host: int = 0,
+        on_error: Callable[[str, PortalError], None] | None = None,
+        retry_attempts: int = 3,
+        retry_delay: float = 0.5,
     ) -> None:
         if isinstance(proxy, list):
             self._rotator = ProxyRotator(proxy)
@@ -111,51 +113,47 @@ class PortalClient:
             self._rotator = None
             self._proxy = proxy
         self._on_error = on_error
-        self._retry: RetryClient | None = None
+        self._retry_attempts = retry_attempts
+        self._retry_delay = retry_delay
+        self._connector = connector
+        self._limit_per_host = limit_per_host
+        self._session: aiohttp.ClientSession | None = None
         self._log_file: Any = None
 
-    def _build_session(self) -> RetryClient:
-        connector = (
-            ProxyConnector.from_url(self._proxy, limit_per_host=25)
-            if self._proxy
-            else aiohttp.TCPConnector(limit_per_host=25)
-        )
-        session = aiohttp.ClientSession(
+    def _make_connector(self) -> aiohttp.BaseConnector:
+        if self._connector:
+            return self._connector
+        if self._proxy:
+            return ProxyConnector.from_url(self._proxy, limit_per_host=self._limit_per_host)
+        return aiohttp.TCPConnector(limit_per_host=self._limit_per_host)
+
+    def _build_session(self) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(
             base_url=portal.settings.portal_base,
-            connector=connector,
+            connector=self._make_connector(),
             headers={**HEADERS, "user-agent": _random_ua()},
             raise_for_status=True,
             trace_configs=[_make_trace(self._log_file)],
         )
 
-        return RetryClient(
-            client_session=session,
-            retry_options=aiohttp_retry.ExponentialRetry(
-                attempts=5,
-                start_timeout=1,
-                max_timeout=30,
-                statuses=RETRY_STATUSES,
-            ),
-        )
-
     @property
-    def session(self) -> RetryClient:
-        if self._retry is None:
-            self._retry = self._build_session()
-        return self._retry
+    def session(self) -> aiohttp.ClientSession:
+        if self._session is None:
+            self._session = self._build_session()
+        return self._session
 
     async def rotate(self) -> None:
         """Close current session and switch to next proxy in pool."""
-        if self._retry:
-            await self._retry.close()
-            self._retry = None
+        if self._session:
+            await self._session.close()
+            self._session = None
         if self._rotator:
             self._proxy = self._rotator.next()
 
     async def close(self) -> None:
-        if self._retry:
-            await self._retry.close()
-            self._retry = None
+        if self._session:
+            await self._session.close()
+            self._session = None
         if self._log_file:
             self._log_file.close()
             self._log_file = None
@@ -175,10 +173,26 @@ class PortalClient:
         await self.close()
 
     async def _request(self, url: str, data: dict) -> str:
-        async with self.session.post(
-            url, data=data, timeout=aiohttp.ClientTimeout(total=30)
-        ) as resp:
-            return await resp.text()
+        identifier = data.get("IssueNumber", data.get("TicketToViewKey", "unknown"))
+        for attempt in range(self._retry_attempts):
+            try:
+                async with self.session.post(
+                    url, data=data, timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    return await resp.text()
+            except (aiohttp.ClientResponseError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
+                if attempt < self._retry_attempts - 1:
+                    await self.rotate()
+                    await asyncio.sleep(self._retry_delay)
+                else:
+                    raise ProxyExhaustedError.from_request(
+                        identifier=identifier,
+                        operation="post",
+                        attempts=self._retry_attempts,
+                        proxy=self._proxy,
+                        cause=exc,
+                    ) from exc
+        return ""
 
     @staticmethod
     def _token() -> str:
@@ -199,10 +213,10 @@ class PortalClient:
                 },
             )
             return SearchResult.from_html(html)
-        except Exception as exc:
+        except ProxyExhaustedError as exc:
             if self._on_error:
                 self._on_error(ticket_number, exc)
-            raise
+            return []
 
     async def details(self, ticket_key: str) -> TicketDetail | None:
         try:
@@ -216,10 +230,10 @@ class PortalClient:
                 },
             )
             return TicketDetail.from_html(html)
-        except Exception as exc:
+        except ProxyExhaustedError as exc:
             if self._on_error:
                 self._on_error(ticket_key, exc)
-            raise
+            return None
 
     async def lookup(self, ticket_number: str) -> list[SearchResult]:
         """Search + fetch details for each result."""
@@ -228,12 +242,7 @@ class PortalClient:
         for r in results:
             if not r.ticket_key:
                 continue
-            try:
-                detail = await self.details(r.ticket_key)
-            except Exception as exc:
-                if self._on_error:
-                    self._on_error(r.ticket_key, exc)
-                continue
+            detail = await self.details(r.ticket_key)
             if detail:
                 r = _merge_detail(r, detail)
             enriched.append(r)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -21,16 +20,9 @@ def _require_at_least_one(value, _):
 
 
 async def _fetch_one(client: PortalClient, n: str) -> TicketView | None:
-    for attempt in range(3):
-        try:
-            results = await client.lookup(n)
-            for r in results:
-                return r.to_view()
-            return None
-        except Exception:
-            if attempt < 2:
-                await client.rotate()
-                await asyncio.sleep(0.5)
+    results = await client.lookup(n)
+    for r in results:
+        return r.to_view()
     return None
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Annotated
 
@@ -17,17 +16,10 @@ from pgh_ticket.repos import TicketRepo
 
 
 async def _fetch_key(client: PortalClient, row: TicketView) -> dict | None:
-    for attempt in range(3):
-        try:
-            results = await client.search(row.number)
-            key = next((r.ticket_key for r in results if r.ticket_key), "")
-            if key:
-                return {**row.to_model_dict(), "ticket_key": key}
-            return None
-        except Exception:
-            if attempt < 2:
-                await client.rotate()
-                await asyncio.sleep(0.5)
+    results = await client.search(row.number)
+    key = next((r.ticket_key for r in results if r.ticket_key), "")
+    if key:
+        return {**row.to_model_dict(), "ticket_key": key}
     return None
 
 
@@ -88,8 +80,15 @@ async def keys(
     empty: list[str] = []
     failed: list[str] = []
 
+    max_workers = workers
+    current_workers = workers
+
     progress = make_progress()
-    task = progress.add_task("fetching keys", total=total, status="starting...")
+    task = progress.add_task(
+        f"fetching keys [{current_workers}w]",
+        total=total,
+        status="starting...",
+    )
 
     proxies = resolve_proxy(proxy)
     proxy_list: list[str] = []
@@ -97,9 +96,6 @@ async def keys(
         proxy_list = proxies
     elif isinstance(proxies, str):
         proxy_list = [proxies]
-
-    max_workers = workers
-    current_workers = min(2, max_workers)
 
     async with ClientPool(proxy_list, max_workers) as pool:
         with progress:
@@ -132,8 +128,10 @@ async def keys(
                     success_rate = len(chunk_results) / len(chunk)
                     if success_rate > 0.95 and current_workers < max_workers:
                         current_workers += 1
+                        progress.update(task, description=f"fetching keys [{current_workers}w]")
                     elif success_rate < 0.70 and current_workers > 1:
                         current_workers -= 1
+                        progress.update(task, description=f"fetching keys [{current_workers}w]")
 
             if batch:
                 await _flush(db, batch)

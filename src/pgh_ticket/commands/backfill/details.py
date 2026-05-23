@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Annotated
 
@@ -19,34 +18,28 @@ from pgh_ticket.repos import TicketRepo
 async def _fetch_details(client: PortalClient, row: TicketView) -> dict | None:
     if not row.ticket_key:
         return None
-    for attempt in range(3):
-        try:
-            results = await client.search(row.number)
-            if not results:
-                return None
-            key = next((r.ticket_key for r in results if r.ticket_key), row.ticket_key)
-            detail = await client.details(key)
-            if detail:
-                return {
-                    "ticket_number": row.number,
-                    "ticket_key": key,
-                    "vehicle_make": detail.vehicle_make or row.vehicle_make,
-                    "license_plate": row.license_plate,
-                    "state": row.state,
-                    "issue_date": row.issue_date,
-                    "location": detail.location or row.location,
-                    "violation": detail.violation or row.violation,
-                    "amount_due": row.amount_due,
-                    "due_date": detail.due_date or row.due_date,
-                    "officer": detail.officer or row.officer,
-                    "notes": detail.notes or row.notes,
-                    "status": row.status,
-                    "ticket_type": row.ticket_type,
-                }
-        except Exception:
-            if attempt < 2:
-                await client.rotate()
-                await asyncio.sleep(0.5)
+    results = await client.search(row.number)
+    if not results:
+        return None
+    key = next((r.ticket_key for r in results if r.ticket_key), row.ticket_key)
+    detail = await client.details(key)
+    if detail:
+        return {
+            "ticket_number": row.number,
+            "ticket_key": key,
+            "vehicle_make": detail.vehicle_make or row.vehicle_make,
+            "license_plate": row.license_plate,
+            "state": row.state,
+            "issue_date": row.issue_date,
+            "location": detail.location or row.location,
+            "violation": detail.violation or row.violation,
+            "amount_due": row.amount_due,
+            "due_date": detail.due_date or row.due_date,
+            "officer": detail.officer or row.officer,
+            "notes": detail.notes or row.notes,
+            "status": row.status,
+            "ticket_type": row.ticket_type,
+        }
     return None
 
 
@@ -107,8 +100,15 @@ async def details(
     empty: list[str] = []
     failed: list[str] = []
 
+    max_workers = workers
+    current_workers = workers
+
     progress = make_progress()
-    task = progress.add_task("fetching details", total=total, status="starting...")
+    task = progress.add_task(
+        f"fetching details [{current_workers}w]",
+        total=total,
+        status="starting...",
+    )
 
     proxies = resolve_proxy(proxy)
     proxy_list: list[str] = []
@@ -116,9 +116,6 @@ async def details(
         proxy_list = proxies
     elif isinstance(proxies, str):
         proxy_list = [proxies]
-
-    max_workers = workers
-    current_workers = min(2, max_workers)
 
     async with ClientPool(proxy_list, max_workers) as pool:
         with progress:
@@ -152,8 +149,10 @@ async def details(
                     success_rate = len(chunk_results) / len(chunk)
                     if success_rate > 0.95 and current_workers < max_workers:
                         current_workers += 1
+                        progress.update(task, description=f"fetching details [{current_workers}w]")
                     elif success_rate < 0.70 and current_workers > 1:
                         current_workers -= 1
+                        progress.update(task, description=f"fetching details [{current_workers}w]")
 
             if batch:
                 await _flush(db, batch)

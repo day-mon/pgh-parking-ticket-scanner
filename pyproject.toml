@@ -8,7 +8,7 @@ dependencies = [
     "alembic>=1.14",
     "aiohttp>=3",
     "aiohttp-socks>=0",
-    "aiohttp-retry>=2",
+
     "anyio>=4",
     "beautifulsoup4>=4",
     "cyclopts>=4",
