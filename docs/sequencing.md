@@ -133,7 +133,9 @@ the search form includes a `GoogleRecaptchaToken` field. the server only checks 
 
 ## database
 
-sqlite via sqlalchemy 2.0 (mapped_column style). stored at `~/.local/share/pgh-ticket/tickets.db` (xdg-compliant via `platformdirs`).
+sqlite via sqlalchemy 2.0 (mapped_column style). stored via `platformdirs`:
+- linux: `~/.local/share/pgh-ticket/tickets.db`
+- macos: `~/Library/Application Support/pgh-ticket/tickets.db`
 
 ### schema
 

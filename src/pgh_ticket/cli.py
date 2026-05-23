@@ -1,19 +1,20 @@
 """pgh-ticket — Pittsburgh parking ticket scanner."""
 
+from __future__ import annotations
+
 import asyncio
 from typing import Annotated
 
 from cyclopts import App, Group, Parameter
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from pgh_ticket.commands.backfill import backfill_cmd
+from pgh_ticket.commands.backfill import backfill_app
 from pgh_ticket.commands.errors import errors_app
-from pgh_ticket.commands.list import list_cmd
-from pgh_ticket.commands.lookup import lookup_cmd
-from pgh_ticket.commands.scan import scan_cmd
-from pgh_ticket.commands.stats import stats_cmd
-from pgh_ticket.commands.sync import sync_cmd
-from pgh_ticket.db import create_database, Database
+from pgh_ticket.commands.list import list_ as list_cmd
+from pgh_ticket.commands.lookup import lookup
+from pgh_ticket.commands.scan.command import scan
+from pgh_ticket.commands.stats import stats
+from pgh_ticket.commands.sync.command import sync
+from pgh_ticket.core import create_database
 
 app = App(
     help="Pittsburgh parking ticket scanner",
@@ -25,13 +26,13 @@ app.meta.group_parameters = Group("Session Parameters", sort_key=0)
 
 
 @app.meta.default
-async def launcher(
+async def main(
     *tokens: Annotated[str, Parameter(show=False, allow_leading_hyphen=True)],
     db_path: Annotated[
         str | None,
         Parameter(("--db",), help="path to sqlite database"),
     ] = None,
-):
+) -> None:
     """Meta-app launcher: creates Database once, injects it into commands."""
     db = create_database(db_path)
     await db.init()
@@ -44,29 +45,30 @@ async def launcher(
     if "session" in ignored:
         async with db.session() as session:
             extra["session"] = session
-            result = command(*bound.args, **bound.kwargs, **extra)
-            if asyncio.iscoroutine(result):
-                result = await result
-            return result
+            return await command(*bound.args, **bound.kwargs, **extra)
 
-    result = command(*bound.args, **bound.kwargs, **extra)
-    if asyncio.iscoroutine(result):
-        result = await result
-    return result
+    return await command(*bound.args, **bound.kwargs, **extra)
 
 
-# Bind __call__ as a method on each instance so cyclopts can inspect the signature.
-app.command(lookup_cmd.__call__, name="lookup")  # type: ignore[arg-type]
-app.command(scan_cmd.__call__, name="scan")  # type: ignore[arg-type]
-app.command(sync_cmd.__call__, name="sync")  # type: ignore[arg-type]
-app.command(list_cmd.__call__, name="list")  # type: ignore[arg-type]
-app.command(stats_cmd.__call__, name="stats")  # type: ignore[arg-type]
-app.command(backfill_cmd.__call__, name="backfill")  # type: ignore[arg-type]
-app.command(errors_app, name="errors")  # type: ignore[arg-type]
+# Import and register commands
+
+app.command(lookup, name="lookup")
+app.command(scan, name="scan")
+app.command(sync, name="sync")
+app.command(list_cmd, name="list")
+app.command(stats, name="stats")
+
+# Sub-apps
+
+app.command(backfill_app, name="backfill")
+app.command(errors_app, name="errors")
+
+
+def main() -> None:
+    asyncio.run(app.meta())
+
 
 if __name__ == "__main__":
-    app.meta()
+    main()
 
-
-# Entry point: cyclopts entry_points can't do app.meta, so expose a callable.
-main = app.meta
+main_entry = main

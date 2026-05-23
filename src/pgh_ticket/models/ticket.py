@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pgh_ticket.models.base import Base
-from pgh_ticket.utils import TicketView
+
+if TYPE_CHECKING:
+    from pgh_ticket.core.fmt import TicketView
 
 
 class Ticket(Base):
@@ -20,6 +22,7 @@ class Ticket(Base):
     )
 
     ticket_number: Mapped[str] = mapped_column(primary_key=True)
+    ticket_key: Mapped[str] = mapped_column(default="")
     vehicle_make: Mapped[str] = mapped_column(default="")
     license_plate: Mapped[str] = mapped_column(default="")
     state: Mapped[str] = mapped_column(default="")
@@ -33,15 +36,12 @@ class Ticket(Base):
     status: Mapped[str] = mapped_column(default="")
     ticket_type: Mapped[str] = mapped_column(default="")
     raw_json: Mapped[str] = mapped_column(default="")
-    first_seen: Mapped[str] = mapped_column(
-        default=lambda: datetime.now(UTC).isoformat(),
-    )
-    updated_at: Mapped[str] = mapped_column(
-        default=lambda: datetime.now(UTC).isoformat(),
-        onupdate=lambda: datetime.now(UTC).isoformat(),
-    )
+    first_seen: Mapped[str] = mapped_column(default="")
+    updated_at: Mapped[str] = mapped_column(default="")
 
-    def to_ticket_view(self) -> TicketView:
+    def to_view(self) -> TicketView:
+        from pgh_ticket.core.fmt import TicketView
+
         return TicketView(
             number=self.ticket_number,
             vehicle_make=self.vehicle_make,
@@ -56,4 +56,23 @@ class Ticket(Base):
             notes=self.notes,
             status=self.status,
             ticket_type=self.ticket_type,
+            ticket_key=self.ticket_key,
         )
+
+    def to_model_dict(self) -> dict[str, object]:
+        return {
+            "ticket_number": self.ticket_number,
+            "ticket_key": self.ticket_key,
+            "vehicle_make": self.vehicle_make,
+            "license_plate": self.license_plate,
+            "state": self.state,
+            "issue_date": self.issue_date,
+            "location": self.location,
+            "violation": self.violation,
+            "amount_due": self.amount_due,
+            "due_date": self.due_date,
+            "officer": self.officer,
+            "notes": self.notes,
+            "status": self.status,
+            "ticket_type": self.ticket_type,
+        }

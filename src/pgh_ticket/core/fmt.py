@@ -1,10 +1,16 @@
-"""Display-only view of a ticket for CLI output."""
+"""Display formatting and CLI helpers."""
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
+
+from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+
+console = Console(stderr=True, force_terminal=True)
 
 
 @dataclass
@@ -41,7 +47,6 @@ class TicketView:
         return f"{self}\n" + "\n".join(extra) if extra else str(self)
 
     def to_dict(self) -> dict[str, object]:
-        """Return a plain dict of all fields."""
         return {
             "number": self.number,
             "vehicle_make": self.vehicle_make,
@@ -60,9 +65,10 @@ class TicketView:
         }
 
     def to_model_dict(self) -> dict[str, object]:
-        """Return a dict keyed for the Ticket model (number -> ticket_number)."""
+        """Return a dict keyed for the Ticket model."""
         return {
             "ticket_number": self.number,
+            "ticket_key": self.ticket_key,
             "vehicle_make": self.vehicle_make,
             "license_plate": self.license_plate,
             "state": self.state,
@@ -93,6 +99,91 @@ def parse_date(s: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def parse_range(number_range: str) -> tuple[int, int]:
+    lo, hi = (int(x) for x in number_range.split("-"))
+    return lo, hi
+
+
+def fmt_status(
+    label: str,
+    count: int,
+    stored: int = 0,
+    errs: int = 0,
+    in_flight: int = 0,
+    skipped: int = 0,
+) -> str:
+    parts = [f"[green]{count}[/] {label}", f"[dim]{stored}[/] stored"]
+    if in_flight:
+        parts.append(f"[yellow]{in_flight}[/] in flight")
+    if errs:
+        parts.append(f"[red]{errs}[/] errs")
+    if skipped:
+        parts.append(f"[dim]⏭ {skipped}[/] no key")
+    return " • ".join(parts)
+
+
+def make_progress(*, transient: bool = True) -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TextColumn("{task.fields[status]}"),
+        console=console,
+        transient=transient,
+    )
+
+
+def build_ticket_table(found: list[TicketView], title: str | None = None) -> Table:
+    if title is None:
+        dates = {d for t in found if (d := parse_date(t.issue_date)) is not None}
+        if dates:
+            title = f"{len(found)} tickets from {min(dates)} to {max(dates)}"
+        else:
+            title = f"{len(found)} tickets"
+
+    table = Table(title=title)
+    table.add_column("number", style="cyan", no_wrap=True)
+    table.add_column("date", style="magenta")
+    table.add_column("type")
+    table.add_column("plate")
+    table.add_column("st", justify="center")
+    table.add_column("status")
+    table.add_column("amount", justify="right")
+    for t in found:
+        table.add_row(
+            t.number,
+            t.issue_date,
+            t.ticket_type,
+            t.license_plate,
+            t.state,
+            t.status,
+            t.amount_due,
+        )
+    return table
+
+
+def build_simple_table(found: list[TicketView], target: str) -> Table:
+    table = Table(title=f"{len(found)} tickets on {target}")
+    table.add_column("number", style="cyan", no_wrap=True)
+    table.add_column("type")
+    table.add_column("plate")
+    table.add_column("st", justify="center")
+    table.add_column("status")
+    table.add_column("amount", justify="right")
+    for t in found:
+        table.add_row(
+            t.number,
+            t.ticket_type,
+            t.license_plate,
+            t.state,
+            t.status,
+            t.amount_due,
+        )
+    return table
 
 
 def print_summary(tickets: list[TicketView]) -> None:

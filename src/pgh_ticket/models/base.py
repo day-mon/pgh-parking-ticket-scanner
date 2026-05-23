@@ -1,11 +1,9 @@
-"""SQLAlchemy declarative base with CRUD mixin."""
+"""SQLAlchemy declarative base."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import DeclarativeBase
 
-from pgh_ticket.models.mixins.crud import CRUDMixin
 
-
-class Base(DeclarativeBase, CRUDMixin):
+class Base(DeclarativeBase):
     pass

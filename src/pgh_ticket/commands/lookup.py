@@ -3,29 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Annotated
 
 from cyclopts import Parameter
 from cyclopts import validators as cyclopts_validators
-from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-)
 
-from pgh_ticket.client import Client
-from pgh_ticket.commands.base import BaseCommand
-from pgh_ticket.commands.common import CommonParams
-from pgh_ticket.db import Database
-from pgh_ticket.models import ErrorLog, Ticket
-from pgh_ticket.utils import TicketView, expand_range
-
-console = Console(stderr=True, force_terminal=True)
+from pgh_ticket.core import Database, TicketView, expand_range, make_progress, resource_map
+from pgh_ticket.core.client import ClientPool, PortalClient
+from pgh_ticket.core.fmt import console
+from pgh_ticket.core.utils import resolve_proxy
+from pgh_ticket.repos import ErrorLogRepo, TicketRepo
 
 
 def _require_at_least_one(value, _):
@@ -33,95 +20,89 @@ def _require_at_least_one(value, _):
         raise ValueError("at least one ticket number required")
 
 
-class LookupCommand(BaseCommand):
+async def _fetch_one(client: PortalClient, n: str) -> TicketView | None:
+    for attempt in range(3):
+        try:
+            results = await client.lookup(n)
+            for r in results:
+                return r.to_view()
+            return None
+        except Exception:
+            if attempt < 2:
+                await client.rotate()
+                await asyncio.sleep(0.5)
+    return None
+
+
+async def lookup(
+    *tickets: Annotated[str, Parameter(validator=_require_at_least_one)],
+    workers: Annotated[
+        int,
+        Parameter(
+            ("-j", "--workers"),
+            help="number of concurrent requests",
+            validator=cyclopts_validators.Number(gte=1),
+        ),
+    ] = 10,
+    verbose: bool = False,
+    proxy: list[str] | None = None,
+    db: Annotated[Database, Parameter(parse=False)],
+) -> None:
     """Look up tickets by number (or range) and store in the database."""
 
-    async def __call__(
-        self,
-        *tickets: Annotated[
-            str,
-            Parameter(validator=_require_at_least_one),
-        ],
-        workers: Annotated[
-            int,
-            Parameter(
-                ("-j", "--workers"),
-                help="number of concurrent requests",
-                validator=cyclopts_validators.Number(gte=1),
-            ),
-        ] = 10,
-        common: CommonParams = CommonParams(),
-        db: Annotated[Database, Parameter(parse=False)] = None,  # type: ignore[assignment]
-    ) -> None:
+    expanded: list[str] = []
+    for t in tickets:
+        expanded.extend(expand_range(t))
 
-        expanded: list[str] = []
-        for t in tickets:
-            expanded.extend(expand_range(t))
+    proxies = resolve_proxy(proxy)
+    proxy_list: list[str] = []
+    if isinstance(proxies, list):
+        proxy_list = proxies
+    elif isinstance(proxies, str):
+        proxy_list = [proxies]
 
-        sem = asyncio.Semaphore(workers)
-        lock = asyncio.Lock()
-        found: list[TicketView] = []
-        seen: set[str] = set()
-        errs = [0]
+    progress = make_progress()
+    task = progress.add_task("looking up", total=len(expanded), status="starting...")
 
-        async def fetch_one(n: str) -> list[TicketView]:
-            async with sem:
-                try:
-                    results = await cl.search(n)
-                except Exception as exc:
-                    async with lock:
-                        errs[0] += 1
+    buffer: list[TicketView] = []
+    seen: set[str] = set()
+
+    async with ClientPool(proxy_list, workers) as pool:
+        with progress:
+            clients = [pool.acquire() for _ in range(workers)]
+            results, failed = await resource_map(
+                expanded,
+                clients,
+                _fetch_one,
+                progress=progress,
+                task_id=task,
+            )
+
+            for tv in results:
+                if tv is None or tv.number in seen:
+                    continue
+                seen.add(tv.number)
+                buffer.append(tv)
+                if len(buffer) >= 50:
                     async with db.session() as session:
-                        await ErrorLog.log(session, number=n, command="lookup", exc=exc)
-                    return []
+                        data = [tv.to_model_dict() for tv in buffer[:50]]
+                        await TicketRepo(session).bulk_upsert(data)
+                    for tv in buffer[:50]:
+                        print(tv.verbose_str() if verbose else str(tv))
+                    buffer = buffer[50:]
 
-            views: list[TicketView] = []
-            async with lock:
-                for r in results:
-                    tv = r.to_ticket_view()
-                    if tv.number not in seen:
-                        seen.add(tv.number)
-                        views.append(tv)
-            return views
+            for n in failed:
+                async with db.session() as session:
+                    await ErrorLogRepo(session).log(
+                        number=n, command="lookup", exc=Exception("lookup failed")
+                    )
 
-        async with Client(proxy=common.proxy) as cl:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                TaskProgressColumn(),
-                TextColumn("•"),
-                TextColumn("{task.fields[status]}"),
-                console=console,
-                transient=True,
-            ) as progress:
-                task = progress.add_task(
-                    "looking up", total=len(expanded), status="starting..."
-                )
+    if buffer:
+        async with db.session() as session:
+            data = [tv.to_model_dict() for tv in buffer]
+            await TicketRepo(session).bulk_upsert(data)
+        for tv in buffer:
+            print(tv.verbose_str() if verbose else str(tv))
 
-                async def work(n: str) -> None:
-                    views = await fetch_one(n)
-                    async with lock:
-                        found.extend(views)
-                        progress.update(
-                            task,
-                            advance=1,
-                            status=f"[green]{len(found)}[/] found • [red]{errs[0]}[/] errs",
-                        )
-
-                await asyncio.gather(*[work(n) for n in expanded], return_exceptions=True)
-
-        if found:
-            async with db.session() as session:
-                for tv in found:
-                    await session.merge(Ticket(**tv.to_model_dict()))
-                await session.commit()
-
-            for tv in found:
-                print(tv.verbose_str() if common.verbose else str(tv))
-        else:
-            console.print("no tickets found.")
-
-
-lookup_cmd = LookupCommand()
+    if not buffer and not results:
+        console.print("no tickets found.")
