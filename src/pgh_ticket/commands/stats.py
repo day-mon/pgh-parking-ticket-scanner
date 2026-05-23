@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json as json_mod
+from datetime import date, datetime
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -14,11 +16,26 @@ from pgh_ticket.core.fmt import console
 from pgh_ticket.repos import ScanRepo, TicketRepo
 
 
+def _json_serialize(obj: object) -> str:
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
 async def stats(
     *,
+    json_: Annotated[
+        bool,
+        Parameter(("--json",), help="output as JSON"),
+    ] = False,
     session: Annotated[AsyncSession, Parameter(parse=False)],
 ) -> None:
-    """Show aggregate ticket statistics."""
+    """Show aggregate ticket statistics.
+
+    Examples:
+      pgh-ticket stats
+      pgh-ticket stats --json
+    """
 
     ticket_repo = TicketRepo(session)
     total = await ticket_repo.count()
@@ -31,6 +48,31 @@ async def stats(
     by_status = await ticket_repo.by_status()
     by_state = await ticket_repo.by_state()
     open_by_state = await ticket_repo.open_by_state()
+    scan_repo = ScanRepo(session)
+    scans = await scan_repo.recent(limit=10)
+
+    if json_:
+        data = {
+            "total": total,
+            "first_date": first_date,
+            "last_date": last_date,
+            "by_status": [{"status": s, "count": n} for s, n in by_status],
+            "by_state": [{"state": s, "count": n} for s, n in by_state[:10]],
+            "open_by_state": [{"state": s, "count": n} for s, n in open_by_state[:10]],
+            "recent_scans": [
+                {
+                    "scanned_at": sc.scanned_at,
+                    "range_start": sc.range_start,
+                    "range_end": sc.range_end,
+                    "until_date": sc.until_date,
+                    "tickets_found": sc.tickets_found,
+                    "duration_s": sc.duration_s,
+                }
+                for sc in scans
+            ],
+        }
+        console.print(json_mod.dumps(data, indent=2, default=_json_serialize))
+        return
 
     # Overview
     overview = Table.grid(padding=(0, 4))
@@ -75,8 +117,6 @@ async def stats(
         console.print(open_table)
 
     # Recent scans
-    scan_repo = ScanRepo(session)
-    scans = await scan_repo.recent(limit=10)
     if scans:
         console.print()
         scan_table = Table(title="recent scans", title_style="bold")

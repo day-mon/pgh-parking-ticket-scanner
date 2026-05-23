@@ -13,7 +13,7 @@ from cyclopts import validators as cyclopts_validators
 
 from pgh_ticket.config import portal
 from pgh_ticket.core import Database
-from pgh_ticket.core.client import PortalClient
+from pgh_ticket.core.client import ClientPool, PortalClient
 from pgh_ticket.core.fmt import build_simple_table, console, print_summary
 from pgh_ticket.core.utils import resolve_proxy
 from pgh_ticket.repos import ClusterRepo, ScanRepo, TicketRepo
@@ -27,7 +27,7 @@ async def sync(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="number of concurrent requests",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -52,10 +52,15 @@ async def sync(
         bool,
         Parameter(("--skip-known",), help="skip numbers already in the database"),
     ] = False,
-    proxy: list[str] | None = None,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Probe ticket numbers looking for a specific issue date."""
+    """Probe ticket numbers looking for a specific issue date.
+
+    Examples:
+      pgh-ticket sync 2026-05-08 -w 3 --step 200
+      pgh-ticket sync 2026-05-08 -w 10 --proxy socks5://10.64.0.1:1080
+    """
 
     target = datetime.strptime(date_str, "%Y-%m-%d").date()
 
@@ -71,25 +76,32 @@ async def sync(
             known = await TicketRepo(session).get_all_numbers()
         console.print(f"[dim]found {len(known):,} known tickets in db[/]")
 
-    async with PortalClient(proxy=resolve_proxy(proxy)) as client:
-        syncer = Syncer(client, db)
+    proxy_list = resolve_proxy(proxy)
+    proxy_str = proxy_list[0] if proxy_list else None
+    if len(proxy_list) > 1:
+        async with ClientPool(proxy_list, workers) as pool:
+            syncer = Syncer(pool, db)
+            found, n_errs, needs_rebuild = await syncer.run(target, workers, step, skip_known, known)
+    else:
+        async with PortalClient(proxy=proxy_str) as client:
+            syncer = Syncer(client, db)
 
-        loop = asyncio.get_event_loop()
-        main_task: asyncio.Task | None = None
+            loop = asyncio.get_event_loop()
+            main_task: asyncio.Task | None = None
 
-        def _on_signal() -> None:
-            if main_task:
-                main_task.cancel()
+            def _on_signal() -> None:
+                if main_task:
+                    main_task.cancel()
 
-        loop.add_signal_handler(signal.SIGTERM, _on_signal)
-        loop.add_signal_handler(signal.SIGINT, _on_signal)
+            loop.add_signal_handler(signal.SIGTERM, _on_signal)
+            loop.add_signal_handler(signal.SIGINT, _on_signal)
 
-        try:
-            main_task = asyncio.ensure_future(syncer.run(target, workers, step, skip_known, known))
-            found, n_errs, needs_rebuild = await main_task
-        except asyncio.CancelledError:
-            console.print("\n[yellow]interrupted — data flushed to db on each find.[/]")
-            return
+            try:
+                main_task = asyncio.ensure_future(syncer.run(target, workers, step, skip_known, known))
+                found, n_errs, needs_rebuild = await main_task
+            except asyncio.CancelledError:
+                console.print("\n[yellow]interrupted — data flushed to db on each find.[/]")
+                return
 
     if needs_rebuild:
         console.print("[dim]rebuilding clusters from ticket data...[/]")

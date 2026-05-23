@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -18,7 +19,11 @@ from rich.progress import (
 )
 from rich.table import Table
 
-console = Console(stderr=True, force_terminal=True)
+console = Console(
+    stderr=True,
+    force_terminal=True,
+    no_color=os.environ.get("NO_COLOR", "") != "",
+)
 
 
 @dataclass

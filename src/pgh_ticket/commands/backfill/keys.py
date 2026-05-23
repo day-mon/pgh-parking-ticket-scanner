@@ -32,7 +32,7 @@ async def keys(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="max concurrent workers (auto-tuned down if errors spike)",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -40,7 +40,7 @@ async def keys(
     limit: Annotated[
         int | None,
         Parameter(
-            ("-n", "--limit"),
+            ("--limit",),
             help="max tickets to process (default: all)",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -62,10 +62,15 @@ async def keys(
         ),
     ] = 50,
     *,
-    proxy: list[str] | None = None,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Fetch ticket_key for tickets that don't have one."""
+    """Fetch ticket_key for tickets that don't have one.
+
+    Examples:
+      pgh-ticket backfill keys -w 40 --proxy socks5://10.64.0.1:1080
+      pgh-ticket backfill keys -w 10 --limit 1000
+    """
 
     async with db.session() as session:
         rows = await TicketRepo(session).list_missing_keys(limit=limit)
@@ -90,12 +95,7 @@ async def keys(
         status="starting...",
     )
 
-    proxies = resolve_proxy(proxy)
-    proxy_list: list[str] = []
-    if isinstance(proxies, list):
-        proxy_list = proxies
-    elif isinstance(proxies, str):
-        proxy_list = [proxies]
+    proxy_list = resolve_proxy(proxy)
 
     async with ClientPool(proxy_list, max_workers) as pool:
         with progress:

@@ -11,20 +11,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pgh_ticket.core import Database
 from pgh_ticket.core.fmt import console
 from pgh_ticket.core.utils import resolve_proxy
-from pgh_ticket.core.client import PortalClient
+from pgh_ticket.core.client import ClientPool, PortalClient
 from pgh_ticket.repos import ErrorLogRepo, TicketRepo
 
 
 async def retry(
     workers: Annotated[
         int,
-        Parameter(("-j", "--workers"), help="number of concurrent workers"),
+        Parameter(("-w", "--workers"), help="number of concurrent workers"),
     ] = 5,
     *,
-    proxy: list[str] | None = None,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Retry unresolved errors."""
+    """Retry unresolved errors.
+
+    Examples:
+      pgh-ticket errors retry -w 5
+      pgh-ticket errors retry -w 10 --proxy socks5://10.64.0.1:1080
+    """
 
     async with db.session() as session:
         errors = await ErrorLogRepo(session).list_unresolved()
@@ -35,6 +40,8 @@ async def retry(
 
     console.print(f"retrying {len(errors)} unresolved errors...")
 
+    proxy_list = resolve_proxy(proxy)
+    proxy_str = proxy_list[0] if proxy_list else None
     sem = asyncio.Semaphore(workers)
     resolved = [0]
     failed = [0]
@@ -42,8 +49,12 @@ async def retry(
     async def try_one(err) -> None:
         async with sem:
             try:
-                async with PortalClient(proxy=resolve_proxy(proxy)) as client:
-                    results = await client.lookup(err.number)
+                if proxy_str:
+                    async with PortalClient(proxy=proxy_str) as client:
+                        results = await client.lookup(err.number)
+                else:
+                    async with PortalClient() as client:
+                        results = await client.lookup(err.number)
                 if results:
                     async with db.session() as session:
                         data = [_to_model_dict(r) for r in results]

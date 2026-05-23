@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json as json_mod
+from datetime import date, datetime
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -9,6 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pgh_ticket.core.fmt import build_ticket_table, console
 from pgh_ticket.repos import TicketRepo
+
+
+def _json_serialize(obj: object) -> str:
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 async def list_(
@@ -38,9 +46,19 @@ async def list_(
     ] = "date",
     *,
     verbose: bool = False,
+    json_: Annotated[
+        bool,
+        Parameter(("--json",), help="output as JSON"),
+    ] = False,
     session: Annotated[AsyncSession, Parameter(parse=False)],
 ) -> None:
-    """List stored tickets with optional filters."""
+    """List stored tickets with optional filters.
+
+    Examples:
+      pgh-ticket list --state PA --status Open -n 20
+      pgh-ticket list --date-from 2026-05-01 --date-to 2026-05-08 --verbose
+      pgh-ticket list --state PA --limit 5 --json
+    """
 
     repo = TicketRepo(session)
     rows = await repo.list_tickets(
@@ -54,6 +72,11 @@ async def list_(
 
     if not rows:
         console.print("no tickets match.")
+        return
+
+    if json_:
+        data = [r.to_dict() for r in rows]
+        console.print(json_mod.dumps(data, indent=2, default=_json_serialize))
         return
 
     if verbose:

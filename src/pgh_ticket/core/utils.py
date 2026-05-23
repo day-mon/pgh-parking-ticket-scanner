@@ -23,20 +23,12 @@ async def batch_flush(
     return total
 
 
-def resolve_proxy(proxy: list[str] | None) -> str | list[str] | None:
-    """Normalize a list of proxy strings into a single proxy or list.
+def resolve_proxy(proxy: str | None) -> list[str]:
+    """Parse comma-separated proxy string into a list of proxy URLs.
 
-    Splits comma-separated values and returns a single string if only
-    one proxy is given, otherwise a list.
+    Accepts a single proxy URL or comma-separated list.
+    Returns an empty list if ``proxy`` is ``None`` or empty.
     """
     if not proxy:
-        return None
-    proxies: list[str] = []
-    for item in proxy:
-        if "," in item:
-            proxies.extend(p.strip() for p in item.split(",") if p.strip())
-        else:
-            proxies.append(item.strip())
-    if len(proxies) == 1:
-        return proxies[0]
-    return proxies
+        return []
+    return [p.strip() for p in proxy.split(",") if p.strip()]

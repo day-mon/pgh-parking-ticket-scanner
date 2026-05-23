@@ -32,7 +32,7 @@ async def scan(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="number of concurrent requests",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -57,10 +57,15 @@ async def scan(
         bool,
         Parameter(("--skip-known",), help="skip numbers already in the database"),
     ] = False,
-    proxy: list[str] | None = None,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Two-phase scan: probe for clusters, then deep-scan windows."""
+    """Two-phase scan: probe for clusters, then deep-scan windows.
+
+    Examples:
+      pgh-ticket scan 8950000-9245300 --until 2026-05-13 -w 20 --step 100
+      pgh-ticket scan 8950000-9245300 --until 2026-05-13 -w 40 --proxy socks5://10.64.0.1:1080
+    """
 
     target = datetime.strptime(until, "%Y-%m-%d").date()
     lo, hi = parse_range(number_range)
@@ -75,12 +80,7 @@ async def scan(
 
     t0 = time.monotonic()
 
-    proxies = resolve_proxy(proxy)
-    proxy_list: list[str] = []
-    if isinstance(proxies, list):
-        proxy_list = proxies
-    elif isinstance(proxies, str):
-        proxy_list = [proxies]
+    proxy_list = resolve_proxy(proxy)
 
     if len(proxy_list) > 1:
         console.print(f"using [yellow]{len(proxy_list)}[/] proxies with [yellow]{workers}[/] workers")
@@ -88,7 +88,7 @@ async def scan(
             scanner = Scanner(pool, db)
             found, n_errs = await scanner.run(lo, hi, target, step, workers, skip_known)
     else:
-        async with PortalClient(proxy=proxies) as client:
+        async with PortalClient(proxy=proxy_list[0] if proxy_list else None) as client:
             scanner = Scanner(client, db)
             found, n_errs = await scanner.run(lo, hi, target, step, workers, skip_known)
 

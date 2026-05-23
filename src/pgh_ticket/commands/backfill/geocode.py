@@ -79,7 +79,7 @@ async def geocode(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="max concurrent requests",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -87,7 +87,7 @@ async def geocode(
     limit: Annotated[
         int | None,
         Parameter(
-            ("-n", "--limit"),
+            ("--limit",),
             help="max unique locations to geocode (default: all)",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -101,9 +101,19 @@ async def geocode(
         ),
     ] = 500,
     *,
+    dry_run: Annotated[
+        bool,
+        Parameter(("-n", "--dry-run"), help="show what would be geocoded without writing to DB"),
+    ] = False,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Geocode unique ticket locations using Mapbox and store lat/lon/address."""
+    """Geocode unique ticket locations using Mapbox and store lat/lon/address.
+
+    Examples:
+      pgh-ticket backfill geocode -w 10
+      pgh-ticket backfill geocode -w 5 --limit 100
+      pgh-ticket backfill geocode -w 10 --dry-run
+    """
 
     async with db.session() as session:
         all_locations = await TicketRepo(session).get_distinct_locations(limit=limit)
@@ -138,18 +148,20 @@ async def geocode(
             if item:
                 batch.append(item)
                 if len(batch) >= batch_size:
-                    await batch_flush(batch, lambda data: _flush(db, data), batch_size)
+                    if not dry_run:
+                        await batch_flush(batch, lambda data: _flush(db, data), batch_size)
 
-        if batch:
+        if batch and not dry_run:
             await _flush(db, batch)
 
     elapsed = time.monotonic() - t0
     rate = total / elapsed if elapsed > 0 else 0.0
     found = len([r for r in results if r is not None])
+    tag = " [yellow](dry run)[/]" if dry_run else ""
     console.print(
         f"\n[bold]{total}/{total}"
         f" — {found} geocoded, {len(failed_items)} failed"
-        f" ({rate:.1f}/s)[/]"
+        f" ({rate:.1f}/s){tag}[/]"
     )
 
     if failed_items:

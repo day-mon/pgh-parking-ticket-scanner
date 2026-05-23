@@ -31,27 +31,28 @@ async def lookup(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="number of concurrent requests",
             validator=cyclopts_validators.Number(gte=1),
         ),
     ] = 10,
     verbose: bool = False,
-    proxy: list[str] | None = None,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Look up tickets by number (or range) and store in the database."""
+    """Look up tickets by number (or range) and store in the database.
+
+    Examples:
+      pgh-ticket lookup 9244895
+      pgh-ticket lookup 8950000-8950005 --verbose
+      pgh-ticket lookup 9244895 --proxy socks5://10.64.0.1:1080
+    """
 
     expanded: list[str] = []
     for t in tickets:
         expanded.extend(expand_range(t))
 
-    proxies = resolve_proxy(proxy)
-    proxy_list: list[str] = []
-    if isinstance(proxies, list):
-        proxy_list = proxies
-    elif isinstance(proxies, str):
-        proxy_list = [proxies]
+    proxy_list = resolve_proxy(proxy)
 
     progress = make_progress()
     task = progress.add_task("looking up", total=len(expanded), status="starting...")

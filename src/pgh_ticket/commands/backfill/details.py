@@ -9,9 +9,9 @@ from cyclopts import Parameter
 from cyclopts import validators as cyclopts_validators
 
 from pgh_ticket.core import Database, TicketView, make_progress, resource_map
+from pgh_ticket.core.client import ClientPool, PortalClient
 from pgh_ticket.core.fmt import console
 from pgh_ticket.core.utils import batch_flush, resolve_proxy
-from pgh_ticket.core.client import ClientPool, PortalClient
 from pgh_ticket.repos import TicketRepo
 
 
@@ -52,7 +52,7 @@ async def details(
     workers: Annotated[
         int,
         Parameter(
-            ("-j", "--workers"),
+            ("-w", "--workers"),
             help="max concurrent workers (auto-tuned down if errors spike)",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -60,7 +60,7 @@ async def details(
     limit: Annotated[
         int | None,
         Parameter(
-            ("-n", "--limit"),
+            ("--limit",),
             help="max tickets to process (default: all)",
             validator=cyclopts_validators.Number(gte=1),
         ),
@@ -82,10 +82,20 @@ async def details(
         ),
     ] = 50,
     *,
-    proxy: list[str] | None = None,
+    dry_run: Annotated[
+        bool,
+        Parameter(("-n", "--dry-run"), help="show what would be fetched without writing to DB"),
+    ] = False,
+    proxy: str | None = None,
     db: Annotated[Database, Parameter(parse=False)],
 ) -> None:
-    """Fetch detail fields for tickets that have a key but missing location."""
+    """Fetch detail fields for tickets that have a key but missing location.
+
+    Examples:
+      pgh-ticket backfill details -w 40 --proxy socks5://10.64.0.1:1080
+      pgh-ticket backfill details -w 40 --limit 1000
+      pgh-ticket backfill details -w 40 --dry-run
+    """
 
     async with db.session() as session:
         rows = await TicketRepo(session).list_missing_details(limit=limit)
@@ -110,12 +120,7 @@ async def details(
         status="starting...",
     )
 
-    proxies = resolve_proxy(proxy)
-    proxy_list: list[str] = []
-    if isinstance(proxies, list):
-        proxy_list = proxies
-    elif isinstance(proxies, str):
-        proxy_list = [proxies]
+    proxy_list = resolve_proxy(proxy)
 
     async with ClientPool(proxy_list, max_workers) as pool:
         with progress:
@@ -142,7 +147,8 @@ async def details(
                 for item in chunk_results:
                     batch.append(item)
                     if len(batch) >= batch_size:
-                        await batch_flush(batch, lambda data: _flush(db, data), batch_size)
+                        if not dry_run:
+                            await batch_flush(batch, lambda data: _flush(db, data), batch_size)
 
                 # auto-scale for next chunk
                 if len(chunk) > 0:
@@ -154,16 +160,17 @@ async def details(
                         current_workers -= 1
                         progress.update(task, description=f"fetching details [{current_workers}w]")
 
-            if batch:
+            if batch and not dry_run:
                 await _flush(db, batch)
 
     elapsed = time.monotonic() - t0
     rate = total / elapsed if elapsed > 0 else 0.0
     found = len(batch)
+    tag = " [yellow](dry run)[/]" if dry_run else ""
     console.print(
         f"\n[bold]{total}/{total}"
         f" — {found} details, {len(empty)} empty, {len(failed)} failed"
-        f" ({rate:.1f}/s)[/]"
+        f" ({rate:.1f}/s){tag}[/]"
     )
 
     if empty:
