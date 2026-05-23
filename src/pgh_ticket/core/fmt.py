@@ -7,7 +7,15 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 console = Console(stderr=True, force_terminal=True)
@@ -130,6 +138,10 @@ def make_progress(*, transient: bool = True) -> Progress:
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
         TextColumn("•"),
         TextColumn("{task.fields[status]}"),
         console=console,

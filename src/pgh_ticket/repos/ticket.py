@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 from typing import Any
 
 from sqlalchemy import func, select
@@ -35,8 +36,8 @@ class TicketRepo:
         *,
         state: str | None = None,
         status: str | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
+        date_from: str | date | None = None,
+        date_to: str | date | None = None,
         limit: int = 50,
         sort: str = "date",
     ) -> Sequence[Ticket]:
@@ -44,11 +45,14 @@ class TicketRepo:
         if state:
             stmt = stmt.where(Ticket.state == state.upper())
         if status:
-            stmt = stmt.where(func.lower(Ticket.status) == status.lower())
+            stmt = stmt.where(Ticket.status == status.lower())
         if date_from:
-            stmt = stmt.where(Ticket.issue_date >= date_from)
+            # accepts str "YYYY-MM-DD" or date object
+            from_val = date_from if isinstance(date_from, date) else date.fromisoformat(date_from)
+            stmt = stmt.where(Ticket.issue_date >= from_val)
         if date_to:
-            stmt = stmt.where(Ticket.issue_date <= date_to)
+            to_val = date_to if isinstance(date_to, date) else date.fromisoformat(date_to)
+            stmt = stmt.where(Ticket.issue_date <= to_val)
 
         if sort == "updated":
             stmt = stmt.order_by(Ticket.updated_at.desc())
@@ -91,7 +95,7 @@ class TicketRepo:
         result = await self.session.execute(select(func.count(Ticket.ticket_number)))
         return result.scalar_one() or 0
 
-    async def date_range(self) -> tuple[str | None, str | None]:
+    async def date_range(self) -> tuple[date | None, date | None]:
         result = await self.session.execute(
             select(func.min(Ticket.issue_date), func.max(Ticket.issue_date))
         )
@@ -117,7 +121,7 @@ class TicketRepo:
     async def open_by_state(self) -> list[tuple[str, int]]:
         result = await self.session.execute(
             select(Ticket.state, func.count(Ticket.ticket_number))
-            .where(func.lower(Ticket.status) == "open")
+            .where(Ticket.status == "open")
             .group_by(Ticket.state)
             .order_by(func.count(Ticket.ticket_number).desc())
         )
