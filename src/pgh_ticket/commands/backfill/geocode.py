@@ -1,4 +1,4 @@
-"""geocode -- geocode ticket locations using Mapbox."""
+"""geocode -- geocode ticket locations using Mapbox V6 batch API."""
 
 from __future__ import annotations
 
@@ -6,66 +6,17 @@ import os
 import time
 from typing import Annotated
 
+from aiohttp import ClientResponseError
 from cyclopts import Parameter
-from cyclopts import validators as cyclopts_validators
 
-from pgh_ticket.core import Database, make_progress, resource_map
+from pgh_ticket.core import Database, make_progress
 from pgh_ticket.core.fmt import console
+from pgh_ticket.core.mapbox import MapboxClient
 from pgh_ticket.core.utils import batch_flush
 from pgh_ticket.repos import LocationRepo, TicketRepo
 
-
-async def _geocode_one(location: str) -> dict | None:
-    """Geocode a single location string using Mapbox."""
-    if not location or location.lower() in ("unknown", "", "n/a"):
-        return None
-
-    try:
-        from mapbox import Geocoder
-
-        token = os.environ.get("MAPBOX_ACCESS_TOKEN") or os.environ.get("MAPBOX_TOKEN")
-        if not token:
-            console.print("[red]mapbox token not found. set MAPBOX_ACCESS_TOKEN or MAPBOX_TOKEN.[/]")
-            return None
-
-        geocoder = Geocoder(access_token=token)
-        response = geocoder.forward(
-            location + ", Pittsburgh, PA",
-            country=["us"],
-            bbox=[-84.51012, 38.50932, -75.12281, 42.73322],
-        )
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-        features = data.get("features", [])
-        if not features:
-            return None
-
-        first = features[0]
-        coords = first.get("geometry", {}).get("coordinates", [0, 0])
-        return {
-            "address": first.get("place_name", ""),
-            "longitude": float(coords[0]),
-            "latitude": float(coords[1]),
-        }
-    except Exception:
-        return None
-
-
-async def _fetch_and_geocode(location: str) -> dict | None:
-    """Fetch geocode data for a location."""
-    result = await _geocode_one(location)
-    if not result:
-        return None
-    return {
-        "raw_location": location,
-        "address": result["address"],
-        "latitude": result["latitude"],
-        "longitude": result["longitude"],
-        "geocoded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
+# Mapbox allows up to 1000 queries per batch request
+_BATCH_SIZE = 1000
 
 
 async def _flush(db: Database, data: list[dict]) -> int:
@@ -76,20 +27,11 @@ async def _flush(db: Database, data: list[dict]) -> int:
 
 
 async def geocode(
-    workers: Annotated[
-        int,
-        Parameter(
-            ("-w", "--workers"),
-            help="max concurrent requests",
-            validator=cyclopts_validators.Number(gte=1),
-        ),
-    ] = 5,
     limit: Annotated[
         int | None,
         Parameter(
             ("--limit",),
             help="max unique locations to geocode (default: all)",
-            validator=cyclopts_validators.Number(gte=1),
         ),
     ] = None,
     batch_size: Annotated[
@@ -97,7 +39,6 @@ async def geocode(
         Parameter(
             ("-b", "--batch-size"),
             help="flush to db after this many (default: 500)",
-            validator=cyclopts_validators.Number(gte=1),
         ),
     ] = 500,
     *,
@@ -109,10 +50,12 @@ async def geocode(
 ) -> None:
     """Geocode unique ticket locations using Mapbox and store lat/lon/address.
 
+    Uses the Mapbox Geocoding V6 batch API (up to 1000 queries per request).
+
     Examples:
-      pgh-ticket backfill geocode -w 10
-      pgh-ticket backfill geocode -w 5 --limit 100
-      pgh-ticket backfill geocode -w 10 --dry-run
+      pgh-ticket backfill geocode
+      pgh-ticket backfill geocode --limit 100
+      pgh-ticket backfill geocode --dry-run
     """
 
     async with db.session() as session:
@@ -128,43 +71,53 @@ async def geocode(
     total = len(to_geocode)
     console.print(f"[dim]{len(all_locations)} unique locations, {total} need geocoding[/]")
 
+    token = os.environ.get("MAPBOX_ACCESS_TOKEN") or os.environ.get("MAPBOX_TOKEN")
+    if not token:
+        console.print("[red]mapbox token not found. set MAPBOX_ACCESS_TOKEN or MAPBOX_TOKEN.[/]")
+        return
+
     t0 = time.monotonic()
-    batch: list[dict] = []
+    flush_batch: list[dict] = []
 
     progress = make_progress()
     task = progress.add_task("geocoding", total=total, status="starting...")
 
     with progress:
-        dummy_resources = [None] * workers
-        results, failed_items = await resource_map(
-            to_geocode,
-            dummy_resources,
-            lambda _, loc: _fetch_and_geocode(loc),
-            progress=progress,
-            task_id=task,
-        )
+        async with MapboxClient(token) as client:
+            for i in range(0, total, _BATCH_SIZE):
+                chunk = to_geocode[i : i + _BATCH_SIZE]
+                try:
+                    chunk_results = await client.geocode_batch(chunk)
+                except ClientResponseError as exc:
+                    console.print(f"\n[red]batch failed at idx {i}: {exc}[/]")
+                    continue
 
-        for item in results:
-            if item:
-                batch.append(item)
-                if len(batch) >= batch_size:
-                    if not dry_run:
-                        await batch_flush(batch, lambda data: _flush(db, data), batch_size)
+                for loc, result in zip(chunk, chunk_results):
+                    if result:
+                        flush_batch.append(
+                            {
+                                "raw_location": loc,
+                                "address": result.address,
+                                "latitude": result.latitude,
+                                "longitude": result.longitude,
+                                "geocoded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            }
+                        )
+                        if len(flush_batch) >= batch_size and not dry_run:
+                            await batch_flush(
+                                flush_batch, lambda data: _flush(db, data), batch_size
+                            )
+                    progress.update(task, advance=1)
 
-        if batch and not dry_run:
-            await _flush(db, batch)
+    if flush_batch and not dry_run:
+        await _flush(db, flush_batch)
 
     elapsed = time.monotonic() - t0
     rate = total / elapsed if elapsed > 0 else 0.0
-    found = len([r for r in results if r is not None])
+    found = len(flush_batch)
     tag = " [yellow](dry run)[/]" if dry_run else ""
     console.print(
         f"\n[bold]{total}/{total}"
-        f" — {found} geocoded, {len(failed_items)} failed"
+        f" — {found} geocoded, {total - found} failed"
         f" ({rate:.1f}/s){tag}[/]"
     )
-
-    if failed_items:
-        console.print(f"[red]failed ({len(failed_items)}):[/] {', '.join(failed_items[:20])}")
-        if len(failed_items) > 20:
-            console.print(f"[dim]... and {len(failed_items) - 20} more[/]")

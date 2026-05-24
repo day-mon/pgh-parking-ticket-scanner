@@ -43,8 +43,8 @@ read-only queries. `list` filters by state, status, date range. `stats` shows ag
 pgh-ticket backfill details -w 40 --proxy socks5://10.64.0.1:1080
 pgh-ticket backfill details -w 40 --dry-run
 pgh-ticket backfill keys -w 10 --limit 1000
-pgh-ticket backfill geocode -w 5
-pgh-ticket backfill geocode -w 5 --dry-run
+pgh-ticket backfill geocode
+pgh-ticket backfill geocode --dry-run
 ```
 
 enrich stored tickets. `details` fetches officer/location/violation for tickets missing them. `keys` fetches the api's internal ticket key. `geocode` turns location strings into lat/lon via mapbox. `--dry-run` shows what would be done without writing to db.
