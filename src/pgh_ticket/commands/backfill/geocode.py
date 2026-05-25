@@ -92,22 +92,21 @@ async def geocode(
                     console.print(f"\n[red]batch failed at idx {i}: {exc}[/]")
                     continue
 
-                for loc, result in zip(chunk, chunk_results):
-                    if result:
-                        flush_batch.append(
-                            {
-                                "raw_location": loc,
-                                "address": result.address,
-                                "latitude": result.latitude,
-                                "longitude": result.longitude,
-                                "geocoded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            }
+                for loc, result in chunk_results:
+                    flush_batch.append(
+                        {
+                            "raw_location": loc,
+                            "address": result.address,
+                            "latitude": result.latitude,
+                            "longitude": result.longitude,
+                            "geocoded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                    )
+                    if len(flush_batch) >= batch_size and not dry_run:
+                        await batch_flush(
+                            flush_batch, lambda data: _flush(db, data), batch_size
                         )
-                        if len(flush_batch) >= batch_size and not dry_run:
-                            await batch_flush(
-                                flush_batch, lambda data: _flush(db, data), batch_size
-                            )
-                    progress.update(task, advance=1)
+                progress.update(task, advance=len(chunk))
 
     if flush_batch and not dry_run:
         await _flush(db, flush_batch)

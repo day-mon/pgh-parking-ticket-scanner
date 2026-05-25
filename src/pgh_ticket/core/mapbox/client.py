@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, TypedDict, TypeVar, Unpack
+import asyncio
+from typing import Any, ClassVar, Unpack
 
 import aiohttp
-from pydantic import BaseModel
+import pydantic
+from aiohttp.client import _RequestOptions
 
 from pgh_ticket.core.mapbox.types import (
     GeocodeBatchItem,
     GeocodeBatchResponse,
     GeocodeResult,
 )
-
-T = TypeVar("T", bound=BaseModel)
-
-
-class _RequestOptions(TypedDict, total=False):
-    """Optional HTTP request parameters passed to _request()."""
-
-    params: dict[str, str]
-    json: Any
-    headers: dict[str, str]
 
 
 class MapboxClient:
@@ -61,7 +53,7 @@ class MapboxClient:
     async def __aexit__(self, *_: Any) -> None:
         await self.close()
 
-    async def _request(
+    async def _request[T: pydantic.BaseModel](
         self,
         method: str,
         endpoint: str,
@@ -79,21 +71,42 @@ class MapboxClient:
         locations: list[str],
         *,
         batch_size: int = 1000,
-    ) -> list[GeocodeResult | None]:
+        max_concurrent: int = 5,
+    ) -> list[tuple[str, GeocodeResult]]:
         """Geocode location strings using the V6 batch API.
 
-        Returns one ``GeocodeResult`` or ``None`` per input location.
-        Locations are sent in batches of up to ``batch_size`` (max 1000).
+        Batches are sent in parallel (up to ``max_concurrent`` at a time).
+
+        Returns ``(location, result)`` tuples for matched locations.
+        Unmatched locations are silently skipped. Each batch has at most
+        ``batch_size`` locations (max 1000).
         """
-        results: list[GeocodeResult | None] = []
-        for i in range(0, len(locations), batch_size):
-            batch = locations[i : i + batch_size]
-            batch_results = await self.geocode_batch(batch)
-            results.extend(batch_results)
+        batches = [
+            locations[i : i + batch_size]
+            for i in range(0, len(locations), batch_size)
+        ]
+
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _run(batch: list[str]) -> list[tuple[str, GeocodeResult]]:
+            async with sem:
+                return await self.geocode_batch(batch)
+
+        tasks = [_run(b) for b in batches]
+        batch_results = await asyncio.gather(*tasks)
+
+        results: list[tuple[str, GeocodeResult]] = []
+        for br in batch_results:
+            results.extend(br)
         return results
 
-    async def geocode_batch(self, locations: list[str]) -> list[GeocodeResult | None]:
-        """Geocode a single batch of locations (max 1000)."""
+    async def geocode_batch(
+        self, locations: list[str]
+    ) -> list[tuple[str, GeocodeResult]]:
+        """Geocode a single batch of locations (max 1000).
+
+        Returns ``(location, result)`` tuples — one per matched location.
+        """
         body = [
             GeocodeBatchItem(
                 q=f"{loc}, Pittsburgh, PA",
@@ -111,10 +124,9 @@ class MapboxClient:
             json=body,
         )
 
-        results: list[GeocodeResult | None] = []
-        for entry in resp.batch:
+        results: list[tuple[str, GeocodeResult]] = []
+        for loc, entry in zip(locations, resp.batch):
             if not entry.features:
-                results.append(None)
                 continue
             feature = entry.features[0]
             geom = feature.geometry
@@ -130,5 +142,7 @@ class MapboxClient:
             else:
                 address = ""
 
-            results.append(GeocodeResult(address=address, latitude=lat, longitude=lng))
+            results.append(
+                (loc, GeocodeResult(address=address, latitude=lat, longitude=lng))
+            )
         return results

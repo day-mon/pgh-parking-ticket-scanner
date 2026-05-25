@@ -17,7 +17,7 @@ from aiohttp import TraceRequestEndParams, TraceRequestStartParams
 from aiohttp_socks import ProxyConnector
 
 from pgh_ticket.config import portal
-from pgh_ticket.core.client.exceptions import PortalError, ProxyExhaustedError, ProxyRotateError
+from pgh_ticket.core.client.exceptions import PortalError, ProxyExhaustedError
 from pgh_ticket.core.client.types import SearchResult, TicketDetail
 
 _CHROME_VERSIONS: tuple[int, ...] = tuple(range(120, 125))
@@ -105,6 +105,7 @@ class PortalClient:
         on_error: Callable[[str, PortalError], None] | None = None,
         retry_attempts: int = 3,
         retry_delay: float = 0.5,
+        log_file: Any = None,
     ) -> None:
         if isinstance(proxy, list):
             self._rotator = ProxyRotator(proxy)
@@ -118,7 +119,6 @@ class PortalClient:
         self._connector = connector
         self._limit_per_host = limit_per_host
         self._session: aiohttp.ClientSession | None = None
-        self._log_file: Any = None
 
     def _make_connector(self) -> aiohttp.BaseConnector:
         if self._connector:
@@ -180,7 +180,7 @@ class PortalClient:
                     url, data=data, timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     return await resp.text()
-            except (aiohttp.ClientResponseError, aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientResponseError, aiohttp.ClientConnectorError) as exc:
                 if attempt < self._retry_attempts - 1:
                     await self.rotate()
                     await asyncio.sleep(self._retry_delay)
